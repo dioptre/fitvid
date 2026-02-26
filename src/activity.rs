@@ -186,7 +186,9 @@ pub struct SlidingWindowProcessor {
 
 impl SlidingWindowProcessor {
     pub fn new(window_seconds: f64, fps: f64, threshold: u8) -> Self {
-        let window_size = (window_seconds * fps).max(60.0) as usize;
+        // Use smaller window for short videos (min 10 frames, max 600)
+        let ideal_window = (window_seconds * fps) as usize;
+        let window_size = ideal_window.max(10).min(600);
         let overlap = window_size / 2; // 50% overlap
 
         log_str(&format!(
@@ -210,30 +212,56 @@ impl SlidingWindowProcessor {
         fps: f64,
     ) -> Vec<WindowTarget> {
         let mut targets = Vec::new();
-        let mut frame_buffer: VecDeque<MemoryEfficientFrame> = VecDeque::with_capacity(self.window_size);
-        let mut current_frame = 0;
 
-        while current_frame < frames.len() {
-            // Fill buffer up to window size
-            while frame_buffer.len() < self.window_size && current_frame < frames.len() {
-                frame_buffer.push_back(frames[current_frame].clone());
-                current_frame += 1;
-            }
+        // For very short videos, use smaller window size
+        let effective_window_size = self.window_size.min(frames.len());
+        let step = (self.window_size - self.overlap).max(10); // Minimum step of 10 frames
 
-            if frame_buffer.len() < 2 {
+        let mut window_start = 0;
+
+        while window_start < frames.len() {
+            let window_end = (window_start + effective_window_size).min(frames.len());
+
+            if window_end - window_start < 2 {
                 break;
             }
 
+            // Create window slice
+            let window_frames: VecDeque<MemoryEfficientFrame> =
+                frames[window_start..window_end].iter().cloned().collect();
+
             // Analyze current window
-            if let Some(target) = self.analyzer.analyze_window(&frame_buffer,
-                current_frame - frame_buffer.len(), fps) {
+            if let Some(target) = self.analyzer.analyze_window(
+                &window_frames,
+                window_start,
+                fps
+            ) {
                 targets.push(target);
             }
 
-            // Slide window: drop old frames, keep overlap
-            let drop_count = (self.window_size - self.overlap).min(frame_buffer.len());
-            for _ in 0..drop_count {
-                frame_buffer.pop_front();
+            // Move to next window
+            window_start += step;
+
+            // Ensure we get at least 3 windows for short videos
+            if window_start >= frames.len() && targets.len() < 3 && window_start > step {
+                // Go back and create one more window from the end
+                window_start = frames.len().saturating_sub(effective_window_size);
+                if window_start > 0 && targets.last().map_or(true, |t| {
+                    let last_time = t.timestamp;
+                    let new_time = (window_start + effective_window_size / 2) as f64 / fps;
+                    (new_time - last_time).abs() > 0.5 // At least 0.5s different
+                }) {
+                    let window_frames: VecDeque<MemoryEfficientFrame> =
+                        frames[window_start..frames.len()].iter().cloned().collect();
+                    if let Some(target) = self.analyzer.analyze_window(
+                        &window_frames,
+                        window_start,
+                        fps
+                    ) {
+                        targets.push(target);
+                    }
+                }
+                break;
             }
         }
 

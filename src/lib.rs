@@ -69,6 +69,29 @@ impl FitvidProcessor {
         ));
     }
 
+    /// Set analysis scale factor (if frames were downsampled)
+    #[wasm_bindgen]
+    pub fn set_analysis_scale(&mut self, analysis_width: u32, analysis_height: u32) {
+        let scale_x = self.src_width as f64 / analysis_width as f64;
+        let scale_y = self.src_height as f64 / analysis_height as f64;
+
+        // Scale up all target coordinates
+        for target in &mut self.targets {
+            target.cx *= scale_x;
+            target.cy *= scale_y;
+            target.spread *= scale_x.max(scale_y);
+            target.bbox_w *= scale_x;
+            target.bbox_h *= scale_y;
+        }
+
+        utils::log_str(&format!(
+            "Scaled targets from {}x{} to {}x{} (scale: {:.2}x, {:.2}x)",
+            analysis_width, analysis_height,
+            self.src_width, self.src_height,
+            scale_x, scale_y
+        ));
+    }
+
     /// Add a frame for analysis (pass ImageData from canvas)
     /// downsample_height: optional target height for downsampling (e.g., 720)
     #[wasm_bindgen]
@@ -106,6 +129,16 @@ impl FitvidProcessor {
             self.fps,
         )?;
 
+        // Debug: Log all targets to see variation
+        utils::log_str(&format!("Activity targets (total: {}):", self.targets.len()));
+        for (i, target) in self.targets.iter().enumerate() {
+            utils::log_str(&format!(
+                "  Target {}: time={:.1}s, cx={:.1}, cy={:.1}, spread={:.1}, bbox={}x{}",
+                i, target.timestamp, target.cx, target.cy, target.spread,
+                target.bbox_w as i32, target.bbox_h as i32
+            ));
+        }
+
         Ok(self.targets.len())
     }
 
@@ -125,6 +158,21 @@ impl FitvidProcessor {
             self.src_width,
             self.src_height,
         )?;
+
+        // Debug: Log first few trajectory points
+        if self.trajectory.len() > 0 {
+            utils::log_str(&format!(
+                "Trajectory sample - Frame 0: x={:.1}, y={:.1}, zoom={:.2}",
+                self.trajectory[0].x, self.trajectory[0].y, self.trajectory[0].zoom
+            ));
+            if self.trajectory.len() > self.trajectory.len() / 2 {
+                let mid = self.trajectory.len() / 2;
+                utils::log_str(&format!(
+                    "Trajectory sample - Frame {}: x={:.1}, y={:.1}, zoom={:.2}",
+                    mid, self.trajectory[mid].x, self.trajectory[mid].y, self.trajectory[mid].zoom
+                ));
+            }
+        }
 
         Ok(self.trajectory.len())
     }

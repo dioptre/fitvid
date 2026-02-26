@@ -103,10 +103,14 @@ async function handleVideoUpload(file) {
 
         console.log(`Video metadata: ${width}x${height}, ${duration.toFixed(1)}s`);
 
-        // Check duration limit
-        if (duration > 120) {
-            alert('Please upload a video shorter than 2 minutes');
-            return;
+        // Optional: warn about long videos
+        if (duration > 300) {
+            const proceed = confirm(
+                `This video is ${Math.floor(duration / 60)} minutes long.\n\n` +
+                `Processing may take ${Math.floor(duration * 2 / 60)}-${Math.floor(duration * 3 / 60)} minutes.\n\n` +
+                `Continue?`
+            );
+            if (!proceed) return;
         }
 
         debugInfo.textContent = `Source: ${width}x${height}, ${duration.toFixed(1)}s\nFile: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)`;
@@ -184,17 +188,23 @@ async function processVideo() {
     // Phase 1: Decode and analyze frames
     updateProgress(5, 'Decoding video frames...', 'This may take a minute');
 
-    const frames = await extractFrames(videoElement, fps, frameCount, (progress) => {
+    const { frames: frameList, analysisHeight, analysisWidth } = await extractFrames(videoElement, fps, frameCount, (progress) => {
         updateProgress(5 + progress * 35, 'Extracting frames...', `${Math.floor(progress * 100)}%`);
     });
 
-    console.log(`Extracted ${frames.length} frames`);
+    console.log(`Extracted ${frameList.length} frames`);
 
     // Phase 2: Analyze activity
     updateProgress(40, 'Analyzing activity...', 'Finding regions of interest');
 
     const targetCount = processor.analyze();
     console.log(`Generated ${targetCount} activity targets`);
+
+    // Scale targets back to full resolution if we downsampled
+    if (analysisHeight < height) {
+        processor.set_analysis_scale(analysisWidth, analysisHeight);
+        console.log(`Scaled coordinates from ${analysisWidth}x${analysisHeight} to ${width}x${height}`);
+    }
 
     const memoryMB = processor.memory_estimate_mb();
     console.log(`Memory usage: ${memoryMB.toFixed(2)} MB`);
@@ -238,10 +248,11 @@ async function extractFrames(video, fps, maxFrames, onProgress) {
 
         // Downsample to 720p for analysis (memory efficiency)
         const analysisHeight = Math.min(720, video.videoHeight);
+        const analysisWidth = Math.floor(video.videoWidth * (analysisHeight / video.videoHeight));
 
         const captureFrame = () => {
             if (frameIndex >= maxFrames || currentTime >= video.duration) {
-                resolve(frames);
+                resolve({ frames, analysisHeight, analysisWidth });
                 return;
             }
 
@@ -269,7 +280,7 @@ async function extractFrames(video, fps, maxFrames, onProgress) {
                     setTimeout(captureFrame, 0); // Continue to next frame
                 } else {
                     video.removeEventListener('seeked', onSeeked);
-                    resolve(frames);
+                    resolve({ frames, analysisHeight, analysisWidth });
                 }
             } catch (err) {
                 video.removeEventListener('seeked', onSeeked);
