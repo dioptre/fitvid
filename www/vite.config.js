@@ -1,6 +1,7 @@
 import { defineConfig } from 'vite';
 
 export default defineConfig({
+  base: '/fitvid/', // Set base path for GitHub Pages
   server: {
     fs: {
       // Allow serving files from the pkg directory during dev
