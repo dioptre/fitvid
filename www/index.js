@@ -216,7 +216,7 @@ async function processVideo() {
     console.log(`Generated ${trajectoryCount} trajectory points`);
 
     // Phase 4: Encode output video
-    updateProgress(50, 'Encoding output video...', 'This may take a while');
+    updateProgress(50, 'Encoding output video...', 'Attempting to preserve audio');
 
     await encodeOutputVideo(videoElement, processor, frameCount, options, (progress) => {
         updateProgress(50 + progress * 50, 'Encoding video...', `Frame ${Math.floor(progress * frameCount)}/${frameCount}`);
@@ -230,8 +230,10 @@ async function processVideo() {
     updateProgress(100, 'Complete!', `Processed in ${processingTime}s`);
 
     // Show preview
+    console.log('Showing preview section...');
     setTimeout(() => {
         showSection(previewSection);
+        console.log('Preview section visible:', previewSection.style.display);
     }, 500);
 }
 
@@ -293,22 +295,87 @@ async function extractFrames(video, fps, maxFrames, onProgress) {
     });
 }
 
-// Encode output video
+// Encode output video - NEW APPROACH: Process first, then render with perfect timing
 async function encodeOutputVideo(video, processor, frameCount, options, onProgress) {
     return new Promise(async (resolve, reject) => {
         try {
-            // Setup MediaRecorder to capture output
-            const stream = outputCanvas.captureStream(30);
+            // Get actual video FPS
+            const videoFps = video.mozDecodedFrames ?
+                (video.mozDecodedFrames / video.duration) :
+                30;
 
-            // Try different codecs in order of preference
+            console.log(`Processing ${frameCount} frames at ${videoFps} fps`);
+
+            // Setup canvases
+            sourceCanvas.width = video.videoWidth;
+            sourceCanvas.height = video.videoHeight;
+            outputCanvas.width = options.out_width;
+            outputCanvas.height = options.out_height;
+
+            const borderPct = options.border_pct;
+            const borderX = Math.floor(video.videoWidth * borderPct / 100);
+            const borderY = Math.floor(video.videoHeight * borderPct / 100);
+
+            // PHASE 1: Pre-process all frames and store as ImageBitmaps (efficient!)
+            console.log('Phase 1: Pre-processing all frames...');
+            const processedFrames = [];
+
+            for (let i = 0; i < frameCount; i++) {
+                const frameTime = i / videoFps;
+                video.currentTime = frameTime;
+
+                await new Promise(resolve => {
+                    video.onseeked = resolve;
+                });
+
+                // Setup source canvas with border
+                sourceCanvas.width = video.videoWidth + 2 * borderX;
+                sourceCanvas.height = video.videoHeight + 2 * borderY;
+
+                sourceCtx.fillStyle = 'black';
+                sourceCtx.fillRect(0, 0, sourceCanvas.width, sourceCanvas.height);
+                sourceCtx.drawImage(video, borderX, borderY);
+
+                // Apply crop to output canvas
+                processor.crop_frame(i, sourceCanvas, outputCanvas, borderPct);
+
+                // Store as ImageBitmap for efficient rendering later
+                const bitmap = await createImageBitmap(outputCanvas);
+                processedFrames.push(bitmap);
+
+                onProgress((i + 1) / frameCount * 0.7); // 0-70% for processing
+            }
+
+            console.log(`✅ Pre-processed ${processedFrames.length} frames`);
+
+            // PHASE 2: Setup MediaRecorder with audio
+            console.log('Phase 2: Setting up encoding with audio...');
+
+            const canvasStream = outputCanvas.captureStream(0); // Manual control
+
+            // Get audio track
+            let audioTrack = null;
+            try {
+                const videoStream = video.captureStream();
+                const audioTracks = videoStream.getAudioTracks();
+                if (audioTracks.length > 0) {
+                    audioTrack = audioTracks[0];
+                    console.log('✅ Audio track captured');
+                }
+            } catch (err) {
+                console.warn('⚠️ No audio track:', err);
+            }
+
+            // Combine streams
+            const combinedStream = new MediaStream();
+            canvasStream.getVideoTracks().forEach(track => combinedStream.addTrack(track));
+            if (audioTrack) {
+                combinedStream.addTrack(audioTrack);
+            }
+
+            // Select codec
             let mimeType = 'video/webm';
-            const codecs = [
-                'video/webm;codecs=vp9',
-                'video/webm;codecs=vp8',
-                'video/webm',
-                'video/mp4'
-            ];
-
+            const codecs = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
             for (const codec of codecs) {
                 if (MediaRecorder.isTypeSupported(codec)) {
                     mimeType = codec;
@@ -317,13 +384,12 @@ async function encodeOutputVideo(video, processor, frameCount, options, onProgre
                 }
             }
 
-            const mediaRecorder = new MediaRecorder(stream, {
+            const mediaRecorder = new MediaRecorder(combinedStream, {
                 mimeType: mimeType,
-                videoBitsPerSecond: 5000000,
+                videoBitsPerSecond: 8000000,
             });
 
             const chunks = [];
-
             mediaRecorder.ondataavailable = (e) => {
                 if (e.data.size > 0) {
                     chunks.push(e.data);
@@ -333,9 +399,12 @@ async function encodeOutputVideo(video, processor, frameCount, options, onProgre
             mediaRecorder.onstop = () => {
                 const blob = new Blob(chunks, { type: mimeType });
                 const url = URL.createObjectURL(blob);
-                outputVideo.src = url;
 
-                // Setup download
+                console.log(`✅ Video encoded: ${(blob.size / 1024 / 1024).toFixed(2)} MB`);
+
+                outputVideo.src = url;
+                outputVideo.load();
+
                 const extension = mimeType.includes('mp4') ? 'mp4' : 'webm';
                 downloadBtn.onclick = () => {
                     const a = document.createElement('a');
@@ -344,59 +413,67 @@ async function encodeOutputVideo(video, processor, frameCount, options, onProgre
                     a.click();
                 };
 
-                resolve();
+                outputVideo.onloadedmetadata = () => {
+                    console.log(`✅ Output ready: ${outputVideo.duration.toFixed(1)}s`);
+                    resolve();
+                };
+
+                outputVideo.onerror = (err) => {
+                    console.error('Error loading output:', err);
+                    resolve();
+                };
             };
 
-            mediaRecorder.onerror = (err) => {
-                reject(err);
-            };
+            // PHASE 3: Render frames at perfect timing using requestAnimationFrame
+            console.log('Phase 3: Rendering frames with perfect timing...');
 
-            // Start recording
+            // Reset video to start and play with audio
+            video.currentTime = 0;
+            video.play();
+
             mediaRecorder.start();
 
-            // Process each frame
-            sourceCanvas.width = video.videoWidth;
-            sourceCanvas.height = video.videoHeight;
-            outputCanvas.width = options.out_width;
-            outputCanvas.height = options.out_height;
+            const outputCtx = outputCanvas.getContext('2d');
+            const startTime = performance.now();
+            const frameDuration = 1000 / videoFps;
+            let frameIndex = 0;
 
-            const fps = 30;
-            const frameInterval = 1000 / fps;
+            const videoTrack = canvasStream.getVideoTracks()[0];
 
-            for (let i = 0; i < frameCount; i++) {
-                const frameTime = i / fps;
-                video.currentTime = frameTime;
+            function renderFrame(timestamp) {
+                const elapsed = performance.now() - startTime;
+                const targetFrame = Math.floor(elapsed / frameDuration);
 
-                await new Promise(resolve => {
-                    video.onseeked = resolve;
-                });
+                // Render all frames up to current time
+                while (frameIndex <= targetFrame && frameIndex < processedFrames.length) {
+                    outputCtx.drawImage(processedFrames[frameIndex], 0, 0);
 
-                // Draw source frame with border
-                const borderPct = options.border_pct;
-                const borderX = Math.floor(video.videoWidth * borderPct / 100);
-                const borderY = Math.floor(video.videoHeight * borderPct / 100);
+                    // Request frame capture
+                    if (videoTrack.requestFrame) {
+                        videoTrack.requestFrame();
+                    }
 
-                sourceCanvas.width = video.videoWidth + 2 * borderX;
-                sourceCanvas.height = video.videoHeight + 2 * borderY;
+                    frameIndex++;
+                    onProgress(0.7 + (frameIndex / frameCount) * 0.3); // 70-100%
+                }
 
-                // Fill with black border
-                sourceCtx.fillStyle = 'black';
-                sourceCtx.fillRect(0, 0, sourceCanvas.width, sourceCanvas.height);
+                if (frameIndex < processedFrames.length) {
+                    requestAnimationFrame(renderFrame);
+                } else {
+                    // All frames rendered
+                    console.log('All frames rendered, finalizing...');
+                    video.pause();
 
-                // Draw video frame
-                sourceCtx.drawImage(video, borderX, borderY);
+                    setTimeout(() => {
+                        mediaRecorder.stop();
 
-                // Apply crop using trajectory
-                processor.crop_frame(i, sourceCanvas, outputCanvas, borderPct);
-
-                onProgress((i + 1) / frameCount);
-
-                // Wait for next frame interval
-                await new Promise(resolve => setTimeout(resolve, frameInterval));
+                        // Cleanup bitmaps
+                        processedFrames.forEach(bitmap => bitmap.close());
+                    }, 500);
+                }
             }
 
-            // Stop recording
-            mediaRecorder.stop();
+            requestAnimationFrame(renderFrame);
 
         } catch (err) {
             reject(err);
