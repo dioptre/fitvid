@@ -353,17 +353,36 @@ async function encodeOutputVideo(video, processor, frameCount, options, onProgre
 
             const canvasStream = outputCanvas.captureStream(0); // Manual control
 
-            // Get audio track
+            // Get audio track (requires video to be playing to capture audio)
             let audioTrack = null;
+            let audioStream = null;
+
+            // Mute video so user doesn't hear it
+            video.muted = true;
+            video.currentTime = 0;
+
+            // Play video briefly to establish audio stream (user clicked button, so autoplay is OK)
             try {
-                const videoStream = video.captureStream();
-                const audioTracks = videoStream.getAudioTracks();
+                await video.play();
+                console.log('Video playing (muted) to capture audio stream');
+
+                // Now capture the stream with audio
+                audioStream = video.captureStream();
+                const audioTracks = audioStream.getAudioTracks();
+
                 if (audioTracks.length > 0) {
                     audioTrack = audioTracks[0];
-                    console.log('✅ Audio track captured');
+                    console.log('✅ Audio track captured:', audioTrack);
+                } else {
+                    console.warn('⚠️ No audio tracks in video');
                 }
+
+                // Pause for now, we'll play again during rendering
+                video.pause();
+                video.currentTime = 0;
             } catch (err) {
-                console.warn('⚠️ No audio track:', err);
+                console.warn('⚠️ Could not capture audio:', err);
+                // Continue without audio
             }
 
             // Combine streams
@@ -427,11 +446,17 @@ async function encodeOutputVideo(video, processor, frameCount, options, onProgre
             // PHASE 3: Render frames at perfect timing using requestAnimationFrame
             console.log('Phase 3: Rendering frames with perfect timing...');
 
-            // Reset video to start and play with audio
+            // Reset video to start (already muted from Phase 2)
             video.currentTime = 0;
-            video.play();
 
+            // Start MediaRecorder first
             mediaRecorder.start();
+
+            // Small delay to ensure recording started
+            await new Promise(resolve => setTimeout(resolve, 100));
+
+            // NOW start video playback (muted, so user doesn't hear it)
+            video.play().catch(err => console.warn('Video play failed:', err));
 
             const outputCtx = outputCanvas.getContext('2d');
             const startTime = performance.now();
