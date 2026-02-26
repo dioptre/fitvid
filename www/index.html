@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FitVid - Smart Video Cropping</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🎬 FitVid</h1>
+            <p>Smart crop screen recordings for social media</p>
+        </header>
+
+        <main>
+            <section class="upload-section">
+                <div class="upload-box" id="uploadBox">
+                    <input type="file" id="videoInput" accept="video/*" hidden>
+                    <div class="upload-content">
+                        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                            <polyline points="17 8 12 3 7 8"></polyline>
+                            <line x1="12" y1="3" x2="12" y2="15"></line>
+                        </svg>
+                        <p>Drop video here or click to upload</p>
+                        <p class="subtitle">Maximum 2 minutes, up to 1080p</p>
+                    </div>
+                </div>
+            </section>
+
+            <section class="options-section" id="optionsSection" style="display: none;">
+                <h2>Processing Options</h2>
+
+                <div class="option-group">
+                    <label for="platform">Platform Preset:</label>
+                    <select id="platform">
+                        <option value="tiktok">TikTok / Reels (1080x1920)</option>
+                        <option value="ig-post">Instagram Post (1080x1350)</option>
+                        <option value="ig-square">Instagram Square (1080x1080)</option>
+                        <option value="yt-shorts">YouTube Shorts (1080x1920)</option>
+                    </select>
+                </div>
+
+                <div class="option-group">
+                    <label for="smoothing">Smoothing Style:</label>
+                    <select id="smoothing">
+                        <option value="default">Default (Balanced)</option>
+                        <option value="snappy">Snappy (Fast movements)</option>
+                        <option value="cinematic">Cinematic (Ultra smooth)</option>
+                    </select>
+                </div>
+
+                <div class="option-group">
+                    <label for="zoom">Zoom Mode:</label>
+                    <select id="zoom">
+                        <option value="auto">Auto (Activity-based)</option>
+                        <option value="close">Close (1.5x fixed)</option>
+                        <option value="none">None (No zoom)</option>
+                    </select>
+                </div>
+
+                <div class="option-group">
+                    <label for="smoothStrength">
+                        Smooth Strength: <span id="smoothStrengthValue">0.5</span>
+                    </label>
+                    <input type="range" id="smoothStrength" min="0" max="1" step="0.1" value="0.5">
+                </div>
+
+                <button id="processBtn" class="process-btn">Process Video</button>
+            </section>
+
+            <section class="progress-section" id="progressSection" style="display: none;">
+                <h2>Processing...</h2>
+                <div class="progress-bar">
+                    <div class="progress-fill" id="progressFill"></div>
+                </div>
+                <p id="progressText">Initializing...</p>
+                <p id="progressSubtext" class="subtitle"></p>
+            </section>
+
+            <section class="preview-section" id="previewSection" style="display: none;">
+                <h2>Preview</h2>
+                <div class="video-container">
+                    <video id="outputVideo" controls></video>
+                </div>
+                <div class="preview-actions">
+                    <button id="downloadBtn" class="download-btn">Download Video</button>
+                    <button id="resetBtn" class="reset-btn">Process Another Video</button>
+                </div>
+            </section>
+
+            <section class="debug-section" id="debugSection" style="display: none;">
+                <h3>Debug Info</h3>
+                <div id="debugInfo" class="debug-info"></div>
+            </section>
+        </main>
+
+        <footer>
+            <p>
+                Powered by Rust + WebAssembly |
+                <a href="https://github.com/yourusername/fitvid-wasm" target="_blank">View Source</a>
+            </p>
+        </footer>
+    </div>
+
+    <!-- Hidden canvases for video processing -->
+    <canvas id="sourceCanvas" style="display: none;"></canvas>
+    <canvas id="outputCanvas" style="display: none;"></canvas>
+
+    <script type="module" src="./index.js"></script>
+</body>
+</html>

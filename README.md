@@ -1,6 +1,22 @@
-# fitvid
+# 🎬 FitVid - Smart Video Cropping
 
 Smart crop screen recordings for social media. Analyzes pixel activity, finds where the action is happening over time, and dynamically pans and zooms to follow it — producing smooth, professional-looking vertical video.
+
+## 🌐 WebAssembly Version (Browser-Based)
+
+**NEW**: Run FitVid directly in your browser with zero installation!
+
+The Rust + WebAssembly port brings FitVid to the web with:
+- ✅ Zero installation - runs entirely in your browser
+- ✅ Privacy-preserving - all processing happens locally
+- ✅ Memory-efficient - processes videos of any length
+- ✅ Cross-platform - works on any device with a modern browser
+
+**[📖 See QUICKSTART.md for complete setup & architecture details](QUICKSTART.md)**
+
+---
+
+## 🐍 Python Version (CLI Tool)
 
 No paid tools. Just OpenCV + FFmpeg.
 

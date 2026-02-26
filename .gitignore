@@ -1,1 +1,52 @@
+# Video files
 *.mp4
+*.webm
+*.mov
+*_output.*
+*_heatmap.*
+
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# WASM build output
+/pkg/
+*.wasm
+
+# Node / npm
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+package-lock.json
+yarn.lock
+.pnpm-debug.log*
+
+# Vite build output
+www/dist/
+www/.vite/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv/
+
+# Temporary files
+tmp/
+temp/
+*.tmp

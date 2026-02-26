@@ -1,0 +1,298 @@
+use crate::types::{MemoryEfficientFrame, WindowTarget};
+use crate::utils::log_str;
+use std::collections::VecDeque;
+
+/// Activity analyzer that processes frames in sliding windows
+pub struct ActivityAnalyzer {
+    window_frames: usize,
+    threshold: u8,
+}
+
+impl ActivityAnalyzer {
+    pub fn new(window_frames: usize, threshold: u8) -> Self {
+        ActivityAnalyzer {
+            window_frames,
+            threshold,
+        }
+    }
+
+    /// Analyze activity in a sliding window of frames
+    /// Returns activity targets for the window
+    pub fn analyze_window(
+        &self,
+        frames: &VecDeque<MemoryEfficientFrame>,
+        window_start_idx: usize,
+        fps: f64,
+    ) -> Option<WindowTarget> {
+        if frames.len() < 2 {
+            return None;
+        }
+
+        let width = frames[0].width;
+        let height = frames[0].height;
+        let size = (width * height) as usize;
+
+        // Compute heatmap from frame differencing
+        let mut heatmap = vec![0.0f64; size];
+
+        for i in 0..frames.len() - 1 {
+            let frame1 = &frames[i];
+            let frame2 = &frames[i + 1];
+
+            for idx in 0..size {
+                let diff = (frame1.grayscale_data[idx] as i32
+                          - frame2.grayscale_data[idx] as i32).abs();
+                heatmap[idx] += diff as f64;
+            }
+        }
+
+        // Normalize and threshold
+        let max_val = heatmap.iter().copied().fold(0.0f64, f64::max);
+        if max_val < 1e-6 {
+            // No activity detected
+            return self.default_target(width, height, window_start_idx, fps);
+        }
+
+        // Normalize to 0-255 range
+        let threshold_val = (self.threshold as f64 * 255.0 / 100.0) as u8;
+        let mut heatmap_masked = vec![0.0f64; size];
+
+        for i in 0..size {
+            let normalized = (heatmap[i] / max_val * 255.0) as u8;
+            if normalized >= threshold_val {
+                heatmap_masked[i] = heatmap[i];
+            }
+        }
+
+        // Calculate centroid and spread
+        let total: f64 = heatmap_masked.iter().sum();
+        if total < 1.0 {
+            return self.default_target(width, height, window_start_idx, fps);
+        }
+
+        let mut cx = 0.0;
+        let mut cy = 0.0;
+
+        for y in 0..height {
+            for x in 0..width {
+                let idx = (y * width + x) as usize;
+                let weight = heatmap_masked[idx];
+                cx += x as f64 * weight;
+                cy += y as f64 * weight;
+            }
+        }
+
+        cx /= total;
+        cy /= total;
+
+        // Calculate spread (weighted standard deviation)
+        let mut spread_x = 0.0;
+        let mut spread_y = 0.0;
+
+        for y in 0..height {
+            for x in 0..width {
+                let idx = (y * width + x) as usize;
+                let weight = heatmap_masked[idx];
+                spread_x += (x as f64 - cx).powi(2) * weight;
+                spread_y += (y as f64 - cy).powi(2) * weight;
+            }
+        }
+
+        spread_x = (spread_x / total).sqrt();
+        spread_y = (spread_y / total).sqrt();
+        let spread = (spread_x + spread_y) / 2.0;
+
+        // Calculate bounding box
+        let (bbox_w, bbox_h) = self.calculate_bounding_box(&heatmap_masked, width, height, threshold_val);
+
+        // Calculate timestamp (center of window)
+        let window_center_frame = window_start_idx + frames.len() / 2;
+        let timestamp = window_center_frame as f64 / fps;
+
+        Some(WindowTarget {
+            timestamp,
+            cx,
+            cy,
+            spread,
+            bbox_w,
+            bbox_h,
+        })
+    }
+
+    /// Calculate bounding box of active pixels
+    fn calculate_bounding_box(
+        &self,
+        heatmap: &[f64],
+        width: u32,
+        height: u32,
+        threshold: u8,
+    ) -> (f64, f64) {
+        let mut min_x = width;
+        let mut max_x = 0u32;
+        let mut min_y = height;
+        let mut max_y = 0u32;
+
+        let threshold_f = threshold as f64;
+        let mut found_any = false;
+
+        for y in 0..height {
+            for x in 0..width {
+                let idx = (y * width + x) as usize;
+                if heatmap[idx] > threshold_f {
+                    found_any = true;
+                    min_x = min_x.min(x);
+                    max_x = max_x.max(x);
+                    min_y = min_y.min(y);
+                    max_y = max_y.max(y);
+                }
+            }
+        }
+
+        if found_any && max_x >= min_x && max_y >= min_y {
+            let bbox_w = (max_x - min_x) as f64;
+            let bbox_h = (max_y - min_y) as f64;
+            (bbox_w, bbox_h)
+        } else {
+            (0.0, 0.0)
+        }
+    }
+
+    /// Return default target (center of frame) when no activity is detected
+    fn default_target(
+        &self,
+        width: u32,
+        height: u32,
+        window_start_idx: usize,
+        fps: f64,
+    ) -> Option<WindowTarget> {
+        let timestamp = (window_start_idx + self.window_frames / 2) as f64 / fps;
+        Some(WindowTarget {
+            timestamp,
+            cx: width as f64 / 2.0,
+            cy: height as f64 / 2.0,
+            spread: 0.0,
+            bbox_w: 0.0,
+            bbox_h: 0.0,
+        })
+    }
+}
+
+/// Streaming activity processor using sliding windows
+pub struct SlidingWindowProcessor {
+    window_size: usize,
+    overlap: usize,
+    analyzer: ActivityAnalyzer,
+}
+
+impl SlidingWindowProcessor {
+    pub fn new(window_seconds: f64, fps: f64, threshold: u8) -> Self {
+        let window_size = (window_seconds * fps).max(60.0) as usize;
+        let overlap = window_size / 2; // 50% overlap
+
+        log_str(&format!(
+            "Sliding window: {} frames ({:.1}s), overlap: {} frames",
+            window_size,
+            window_seconds,
+            overlap
+        ));
+
+        SlidingWindowProcessor {
+            window_size,
+            overlap,
+            analyzer: ActivityAnalyzer::new(window_size, threshold),
+        }
+    }
+
+    /// Process a batch of frames and extract activity targets
+    pub fn process_frames(
+        &self,
+        frames: &[MemoryEfficientFrame],
+        fps: f64,
+    ) -> Vec<WindowTarget> {
+        let mut targets = Vec::new();
+        let mut frame_buffer: VecDeque<MemoryEfficientFrame> = VecDeque::with_capacity(self.window_size);
+        let mut current_frame = 0;
+
+        while current_frame < frames.len() {
+            // Fill buffer up to window size
+            while frame_buffer.len() < self.window_size && current_frame < frames.len() {
+                frame_buffer.push_back(frames[current_frame].clone());
+                current_frame += 1;
+            }
+
+            if frame_buffer.len() < 2 {
+                break;
+            }
+
+            // Analyze current window
+            if let Some(target) = self.analyzer.analyze_window(&frame_buffer,
+                current_frame - frame_buffer.len(), fps) {
+                targets.push(target);
+            }
+
+            // Slide window: drop old frames, keep overlap
+            let drop_count = (self.window_size - self.overlap).min(frame_buffer.len());
+            for _ in 0..drop_count {
+                frame_buffer.pop_front();
+            }
+        }
+
+        targets
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_activity_analyzer_no_activity() {
+        let analyzer = ActivityAnalyzer::new(10, 10);
+
+        // Create identical frames (no activity)
+        let mut frames = VecDeque::new();
+        for _ in 0..10 {
+            let frame = MemoryEfficientFrame {
+                grayscale_data: vec![128u8; 100],
+                width: 10,
+                height: 10,
+            };
+            frames.push_back(frame);
+        }
+
+        let target = analyzer.analyze_window(&frames, 0, 30.0);
+        assert!(target.is_some());
+
+        let target = target.unwrap();
+        // Should default to center
+        assert_eq!(target.cx, 5.0);
+        assert_eq!(target.cy, 5.0);
+    }
+
+    #[test]
+    fn test_activity_analyzer_with_activity() {
+        let analyzer = ActivityAnalyzer::new(3, 5);
+
+        let mut frames = VecDeque::new();
+
+        // First frame - dark
+        frames.push_back(MemoryEfficientFrame {
+            grayscale_data: vec![0u8; 100],
+            width: 10,
+            height: 10,
+        });
+
+        // Second frame - bright spot in corner
+        let mut data = vec![0u8; 100];
+        data[0] = 255;
+        data[1] = 255;
+        frames.push_back(MemoryEfficientFrame {
+            grayscale_data: data,
+            width: 10,
+            height: 10,
+        });
+
+        let target = analyzer.analyze_window(&frames, 0, 30.0);
+        assert!(target.is_some());
+    }
+}
