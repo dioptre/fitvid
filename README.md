@@ -18,7 +18,7 @@ The Rust + WebAssembly port brings FitVid to the web with:
 
 ## 🐍 Python Version (CLI Tool)
 
-No paid tools. Just OpenCV + FFmpeg.
+No paid tools. Just OpenCV + FFmpeg. 
 
 ## TL;DR
 ```
