@@ -18,7 +18,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import math
 import shutil
 import subprocess
 import sys
@@ -62,6 +61,8 @@ class WindowTarget:
     cx: float  # center x (pixels, in source frame coords)
     cy: float  # center y
     spread: float  # activity spread (std dev of active pixels)
+    bbox_w: float  # bounding box width of active region
+    bbox_h: float  # bounding box height of active region
 
 
 # ---------------------------------------------------------------------------
@@ -143,7 +144,7 @@ def analyze_activity(
         if global_heatmap is not None:
             global_heatmap += heatmap_masked
 
-        # Find centroid (weighted center of mass)
+        # Find centroid (weighted center of mass) and bounding box
         total = heatmap_masked.sum()
         if total > 0:
             ys, xs = np.mgrid[0:height, 0:width]
@@ -153,12 +154,23 @@ def analyze_activity(
             spread_x = float(np.sqrt(((xs - cx) ** 2 * heatmap_masked).sum() / total))
             spread_y = float(np.sqrt(((ys - cy) ** 2 * heatmap_masked).sum() / total))
             spread = (spread_x + spread_y) / 2
+            # Bounding box of active pixels
+            active_rows = np.any(mask > 0, axis=1)
+            active_cols = np.any(mask > 0, axis=0)
+            if active_rows.any() and active_cols.any():
+                row_indices = np.where(active_rows)[0]
+                col_indices = np.where(active_cols)[0]
+                bbox_w = float(col_indices[-1] - col_indices[0])
+                bbox_h = float(row_indices[-1] - row_indices[0])
+            else:
+                bbox_w, bbox_h = 0.0, 0.0
         else:
             cx, cy = width / 2, height / 2
             spread = 0.0
+            bbox_w, bbox_h = 0.0, 0.0
 
         timestamp = ((window_start + window_end) / 2) / fps
-        targets.append(WindowTarget(timestamp, cx, cy, spread))
+        targets.append(WindowTarget(timestamp, cx, cy, spread, bbox_w, bbox_h))
         window_start += step_frames
 
     print(f"Generated {len(targets)} activity targets")
@@ -184,23 +196,95 @@ def _save_preview(
 # Phase 2: Trajectory smoothing
 # ---------------------------------------------------------------------------
 
-def interpolate_to_frames(
-    targets: list[WindowTarget], fps: float, frame_count: int
+def compute_zoom_from_spread(
+    spreads: np.ndarray, src_w: int, src_h: int, zoom_max: float
 ) -> np.ndarray:
-    """Interpolate window-level targets to per-frame (x, y) trajectory."""
+    """Map activity spread values to zoom levels.
+
+    Low spread (concentrated activity) → high zoom.
+    High spread (diffuse activity) → zoom ~1.0.
+    """
+    frame_size = max(src_w, src_h)
+    norm = spreads / frame_size  # ~0 to ~0.5
+    # Invert: tight spread = high zoom, wide spread = zoom 1.0
+    raw_zoom = zoom_max - (zoom_max - 1.0) * np.clip(norm / 0.3, 0, 1)
+    return raw_zoom
+
+
+def interpolate_to_frames(
+    targets: list[WindowTarget],
+    fps: float,
+    frame_count: int,
+    src_w: int,
+    src_h: int,
+    out_w: int,
+    out_h: int,
+    zoom_mode: str,
+    zoom_max: float,
+    padding: int,
+) -> np.ndarray:
+    """Interpolate window-level targets to per-frame (x, y, zoom) trajectory."""
     if not targets:
-        return np.zeros((frame_count, 2))
+        return np.column_stack([
+            np.zeros(frame_count),
+            np.zeros(frame_count),
+            np.ones(frame_count),
+        ])
 
     # Timestamps and positions
     ts = np.array([t.timestamp for t in targets])
     xs = np.array([t.cx for t in targets])
     ys = np.array([t.cy for t in targets])
+    spreads = np.array([t.spread for t in targets])
+    bbox_ws = np.array([t.bbox_w for t in targets])
+    bbox_hs = np.array([t.bbox_h for t in targets])
 
     frame_times = np.arange(frame_count) / fps
     traj_x = np.interp(frame_times, ts, xs)
     traj_y = np.interp(frame_times, ts, ys)
 
-    return np.column_stack([traj_x, traj_y])
+    # Compute per-frame zoom
+    if zoom_mode == "auto":
+        window_zoom = compute_zoom_from_spread(spreads, src_w, src_h, zoom_max)
+        traj_zoom = np.interp(frame_times, ts, window_zoom)
+    elif zoom_mode == "close":
+        traj_zoom = np.full(frame_count, 1.5)
+    else:  # "none"
+        traj_zoom = np.ones(frame_count)
+
+    # Bbox-aware zoom floor: ensure the active bounding box fits in the crop.
+    # Interpolate bbox to per-frame, then compute the max zoom that still
+    # contains the bbox (with some breathing room).
+    if zoom_mode != "none":
+        out_aspect = out_w / out_h
+        # Base crop size (before zoom)
+        if src_w / src_h > out_aspect:
+            base_h = src_h - 2 * padding
+            base_w = int(base_h * out_aspect)
+        else:
+            base_w = src_w - 2 * padding
+            base_h = int(base_w / out_aspect)
+
+        per_frame_bw = np.interp(frame_times, ts, bbox_ws)
+        per_frame_bh = np.interp(frame_times, ts, bbox_hs)
+
+        # Add 20% breathing room around the bbox
+        margin = 1.2
+        needed_w = per_frame_bw * margin
+        needed_h = per_frame_bh * margin
+
+        # Max zoom that fits bbox: base_dim / needed_dim
+        # Only constrain where bbox is non-trivial (> 10px)
+        for i in range(frame_count):
+            if needed_w[i] > 10 and needed_h[i] > 10:
+                max_zoom_w = base_w / needed_w[i]
+                max_zoom_h = base_h / needed_h[i]
+                bbox_zoom_cap = min(max_zoom_w, max_zoom_h)
+                bbox_zoom_cap = max(1.0, bbox_zoom_cap)  # never below 1.0
+                if traj_zoom[i] > bbox_zoom_cap:
+                    traj_zoom[i] = bbox_zoom_cap
+
+    return np.column_stack([traj_x, traj_y, traj_zoom])
 
 
 def smooth_kalman(traj: np.ndarray, process_noise: float = 1e-2) -> np.ndarray:
@@ -265,7 +349,7 @@ def smooth_gaussian(traj: np.ndarray, sigma: float) -> np.ndarray:
     kernel_size = max(3, min(kernel_size, len(traj) // 2 * 2 - 1))
 
     smoothed = np.copy(traj)
-    for axis in range(2):
+    for axis in range(traj.shape[1]):
         col = traj[:, axis].astype(np.float64)
         # Pad with edge values
         padded = np.pad(col, kernel_size, mode="edge")
@@ -320,25 +404,37 @@ def apply_smoothing(
     smooth_window: float,
     smooth_strength: float,
 ) -> np.ndarray:
-    """Apply the selected smoothing pipeline."""
+    """Apply the selected smoothing pipeline.
+
+    traj is Nx3 (x, y, zoom). Smooth x/y with the full pipeline,
+    smooth zoom separately with Gaussian + EMA to avoid Kalman complexity.
+    """
     sigma = smooth_window * fps * smooth_strength
+
+    xy = traj[:, :2]
+    zoom = traj[:, 2:3]  # keep as Nx1
 
     if preset == "snappy":
         alpha = 0.15 + 0.35 * smooth_strength  # range ~0.15 to 0.5
-        return smooth_ema(traj, alpha=alpha)
+        xy = smooth_ema(xy, alpha=alpha)
+        zoom = smooth_ema(zoom, alpha=alpha)
     elif preset == "cinematic":
-        traj = smooth_kalman(traj, process_noise=5e-3)
-        traj = smooth_gaussian(traj, sigma=sigma)
-        traj = smooth_ease_in_out(
-            traj,
+        xy = smooth_kalman(xy, process_noise=5e-3)
+        xy = smooth_gaussian(xy, sigma=sigma)
+        xy = smooth_ease_in_out(
+            xy,
             threshold_px=50,
             transition_frames=int(fps * 0.8),
         )
-        return traj
+        zoom = smooth_gaussian(zoom, sigma=sigma * 1.5)
+        zoom = smooth_ema(zoom, alpha=0.1)
     else:  # default
-        traj = smooth_kalman(traj, process_noise=1e-2)
-        traj = smooth_gaussian(traj, sigma=sigma)
-        return traj
+        xy = smooth_kalman(xy, process_noise=1e-2)
+        xy = smooth_gaussian(xy, sigma=sigma)
+        zoom = smooth_gaussian(zoom, sigma=sigma)
+        zoom = smooth_ema(zoom, alpha=0.2)
+
+    return np.column_stack([xy, zoom])
 
 
 # ---------------------------------------------------------------------------
@@ -353,26 +449,32 @@ def compute_crop_box(
     out_w: int,
     out_h: int,
     padding: int,
+    zoom: float = 1.0,
 ) -> tuple[int, int, int, int]:
     """Compute crop box (x, y, w, h) centered on (cx, cy).
 
     The crop region has the same aspect ratio as the output, is as large as
     possible within the source frame, and is clamped to frame bounds.
+    zoom > 1.0 makes the crop smaller (zoomed in).
     """
     out_aspect = out_w / out_h
+    zoom = max(0.5, zoom)  # floor at 0.5 to prevent extreme zoom-out
 
-    # Determine crop size: largest rectangle with output aspect that fits source
+    # Determine base crop size: largest rectangle with output aspect that fits source
     if src_w / src_h > out_aspect:
-        # Source is wider than needed — height-limited
-        crop_h = src_h - 2 * padding
-        crop_w = int(crop_h * out_aspect)
+        base_h = src_h - 2 * padding
+        base_w = int(base_h * out_aspect)
     else:
-        # Source is taller than needed — width-limited
-        crop_w = src_w - 2 * padding
-        crop_h = int(crop_w / out_aspect)
+        base_w = src_w - 2 * padding
+        base_h = int(base_w / out_aspect)
 
-    crop_w = max(1, crop_w)
-    crop_h = max(1, crop_h)
+    # Apply zoom: shrink crop by zoom factor
+    crop_w = int(base_w / zoom)
+    crop_h = int(base_h / zoom)
+
+    # Clamp to canvas bounds
+    crop_w = max(1, min(crop_w, src_w))
+    crop_h = max(1, min(crop_h, src_h))
 
     # Center crop on the target point, clamp to frame
     x = int(cx - crop_w / 2)
@@ -394,8 +496,23 @@ def encode_video(
     out_w: int,
     out_h: int,
     padding: int,
+    border_pct: float = 5.0,
 ) -> None:
-    """Read frames, crop, resize, write output, then mux audio."""
+    """Read frames, crop, resize, write output, then mux audio.
+
+    border_pct adds a black border around each frame (as % of frame size)
+    so the crop window can pull back beyond the original source edges.
+    """
+    # Compute border in pixels
+    border_x = int(src_w * border_pct / 100)
+    border_y = int(src_h * border_pct / 100)
+    canvas_w = src_w + 2 * border_x
+    canvas_h = src_h + 2 * border_y
+
+    if border_pct > 0:
+        print(f"Border: {border_pct:.0f}% = {border_x}px x {border_y}px "
+              f"(canvas {canvas_w}x{canvas_h})")
+
     tmp_dir = tempfile.mkdtemp(prefix="fitvid_")
     tmp_video = str(Path(tmp_dir) / "video_only.mp4")
 
@@ -416,8 +533,21 @@ def encode_video(
         if not ret:
             break
 
-        cx, cy = traj[i]
-        x, y, cw, ch = compute_crop_box(cx, cy, src_w, src_h, out_w, out_h, padding)
+        # Pad frame with black border
+        if border_x > 0 or border_y > 0:
+            frame = cv2.copyMakeBorder(
+                frame, border_y, border_y, border_x, border_x,
+                cv2.BORDER_CONSTANT, value=(0, 0, 0),
+            )
+
+        # Offset trajectory coords into padded canvas space
+        cx, cy, zoom = traj[i]
+        cx += border_x
+        cy += border_y
+
+        x, y, cw, ch = compute_crop_box(
+            cx, cy, canvas_w, canvas_h, out_w, out_h, padding, zoom
+        )
         cropped = frame[y : y + ch, x : x + cw]
         resized = cv2.resize(cropped, (out_w, out_h), interpolation=cv2.INTER_LANCZOS4)
         writer.write(resized)
@@ -518,11 +648,32 @@ def build_parser() -> argparse.ArgumentParser:
         help="Smoothing strength 0.0-1.0 (default: 0.5)",
     )
 
+    # Zoom
+    parser.add_argument(
+        "--zoom",
+        choices=["auto", "none", "close"],
+        default="auto",
+        help="Zoom mode: auto (spread-driven), none (fixed crop), close (1.5x) (default: auto)",
+    )
+    parser.add_argument(
+        "--zoom-max",
+        type=float,
+        default=2.0,
+        help="Maximum zoom factor for auto mode (default: 2.0)",
+    )
+
     # Other flags
     parser.add_argument(
         "--preview",
         action="store_true",
         help="Save activity heatmap image alongside output",
+    )
+    parser.add_argument(
+        "--border-size",
+        type=float,
+        default=10.0,
+        help="Black border as %% of frame size, 0-200 (default: 5). "
+             "Gives the crop room to pull back beyond source edges.",
     )
     parser.add_argument(
         "--padding",
@@ -553,6 +704,9 @@ def _parse_resolution(value: str) -> tuple[int, int]:
 
 def main() -> None:
     parser = build_parser()
+    if len(sys.argv) < 2:
+        parser.print_help()
+        sys.exit(1)
     args = parser.parse_args()
 
     input_path = args.input
@@ -571,6 +725,8 @@ def main() -> None:
     print(f"fitvid — cropping to {out_w}x{out_h}")
     print(f"Smooth: {args.smooth} (window={args.smooth_window}s, "
           f"strength={args.smooth_strength})")
+    print(f"Zoom: {args.zoom} (max={args.zoom_max})")
+    print(f"Border: {args.border_size}%")
 
     # Phase 1: Analyze
     print("\n=== Phase 1: Activity Analysis ===")
@@ -583,7 +739,10 @@ def main() -> None:
 
     # Phase 2: Smooth
     print("\n=== Phase 2: Trajectory Smoothing ===")
-    traj = interpolate_to_frames(targets, fps, frame_count)
+    traj = interpolate_to_frames(
+        targets, fps, frame_count, src_w, src_h,
+        out_w, out_h, args.zoom, args.zoom_max, args.padding,
+    )
     traj = apply_smoothing(
         traj, args.smooth, fps, args.smooth_window, args.smooth_strength
     )
@@ -602,6 +761,7 @@ def main() -> None:
         out_w,
         out_h,
         args.padding,
+        border_pct=args.border_size,
     )
 
     print("\nDone!")

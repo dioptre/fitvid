@@ -4,6 +4,11 @@ Smart crop screen recordings for social media. Analyzes pixel activity, finds wh
 
 No paid tools. Just OpenCV + FFmpeg.
 
+## TL;DR
+```
+uv run --python 3.12 fitvid.py robinhood.mp4 -o robinhood_tiktok.mp4 --tiktok
+```
+
 ## Requirements
 
 - [uv](https://docs.astral.sh/uv/) (manages Python + dependencies automatically)
@@ -75,12 +80,13 @@ uv run fitvid.py recording.mp4 -o custom.mp4 --custom 720x1280
 | `--smooth-strength` | `0.5` | Smoothing strength (0.0–1.0) |
 | `--zoom` | `auto` | Zoom mode |
 | `--zoom-max` | `2.0` | Max zoom factor for auto mode |
+| `--border-size` | `10` | Black border as % of frame size (0–200). Gives the crop room to pull back beyond source edges. |
 | `--padding` | `50` | Extra pixels around detected region |
 | `--threshold` | `10` | Activity threshold (0–100) to filter noise |
 | `--preview` | off | Save activity heatmap image |
 
 ## How it works
 
-1. **Analyze** — Divides video into overlapping time windows, computes frame-to-frame pixel diffs, finds the weighted center of activity and its spread in each window
-2. **Smooth** — Interpolates targets to per-frame positions, applies the selected smoothing pipeline (Kalman, Gaussian, EMA, ease-in-out) to both the pan trajectory and zoom level
-3. **Encode** — Crops each frame at the smoothed position and zoom level, resizes to target resolution, muxes audio from the original via FFmpeg
+1. **Analyze** — Divides video into overlapping time windows, computes frame-to-frame pixel diffs, finds the weighted center of activity, its spread, and bounding box in each window
+2. **Smooth** — Interpolates targets to per-frame positions, applies the selected smoothing pipeline (Kalman, Gaussian, EMA, ease-in-out) to both the pan trajectory and zoom level. Zoom is capped per-frame so the active bounding box always fits in the crop.
+3. **Encode** — Pads each frame with a black border (default 5%), crops at the smoothed position and zoom level, resizes to target resolution, muxes audio from the original via FFmpeg
